@@ -1,4 +1,4 @@
-all: main
+all: server
 
-main: main.c
-	gcc main.c -o main
+server: server.c
+	gcc server.c -o build/server

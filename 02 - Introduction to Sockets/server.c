@@ -12,6 +12,7 @@
 #include <unistd.h>
 
 #define SOCKET int
+#define PORT "8080"
 
 volatile sig_atomic_t execute = 1;
 void trap(int signal) {
@@ -19,18 +20,21 @@ void trap(int signal) {
 }
 
 int main() {
-  signal(SIGINT, trap);
+  if (signal(SIGINT, trap) == SIG_ERR) {
+    fprintf(stderr, "Failed to register signal");
+    return 1;
+  }
 
   printf("Configurtion local address...\n");
 
   struct addrinfo hints;
   memset(&hints, 0, sizeof(hints));
-  hints.ai_family = AF_INET;
+  hints.ai_family = AF_INET6;
   hints.ai_socktype = SOCK_STREAM;
   hints.ai_flags = AI_PASSIVE;
 
   struct addrinfo *bind_address;
-  if (getaddrinfo(NULL, "8082", &hints, &bind_address) != 0) {
+  if (getaddrinfo(NULL, PORT, &hints, &bind_address) != 0) {
     fprintf(stderr, "getaddrsinfo failed");
     return 1;
   }
@@ -41,6 +45,14 @@ int main() {
              bind_address->ai_protocol);
   if (socket_server < 0) {
     fprintf(stderr, "Failed to create socket (%d)", errno);
+    freeaddrinfo(bind_address);
+    return 1;
+  }
+
+  // Support IPv4 and IPv6
+  int option = 0;
+  if (setsockopt(socket_server, IPPROTO_IPV6, IPV6_V6ONLY, (void*)&option, sizeof(option))){
+    fprintf(stderr, "Failed to setsockopt. (%d)\n", errno);
     freeaddrinfo(bind_address);
     return 1;
   }
