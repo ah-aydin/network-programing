@@ -4,7 +4,6 @@
 #include <errno.h>
 #include <netdb.h>
 #include <netinet/in.h>
-#include <signal.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/select.h>
@@ -79,7 +78,8 @@ int main(int argc, char *argv[]) {
 
     if (FD_ISSET(socket_peer, &reads)) {
       char read_buffer[4096];
-      int bytes_recieved = recv(socket_peer, read_buffer, sizeof(read_buffer), 0);
+      int bytes_recieved =
+          recv(socket_peer, read_buffer, sizeof(read_buffer), 0);
       if (bytes_recieved < 1) {
         printf("Connection closed by peer\n");
         break;
