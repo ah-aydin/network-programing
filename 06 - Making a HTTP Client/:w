@@ -1,0 +1,240 @@
+#include <arpa/inet.h>
+#include <bits/types/struct_timeval.h>
+#include <bits/types/timer_t.h>
+#include <errno.h>
+#include <netdb.h>
+#include <netinet/in.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/select.h>
+#include <sys/socket.h>
+#include <sys/types.h>
+#include <time.h>
+#include <unistd.h>
+
+#define TIMEOUT 5.0
+#define SEP_PROT "://"
+#define RESPONSE_SIZE 8192
+
+void parse_url(char *url, char **hostname, char **port, char **path) {
+  printf("============================================\n");
+  printf("URL: %s\n", url);
+
+  char *p;
+  char *protocol;
+  p = strstr(url, SEP_PROT);
+  if (p) {
+    protocol = url;
+    *p = 0;
+    p += strlen(SEP_PROT);
+  } else {
+    protocol = "http";
+    p = url;
+  }
+
+  *hostname = p;
+  while (*p && *p != ':' && *p != '/' && *p != '#') {
+    p++;
+  }
+  *p++ = 0;
+
+  if (*p == ':') {
+    *port = p;
+    while (*p && *p != '/' && *p != '#') {
+      p++;
+    }
+    *p++ = 0;
+  } else {
+    *port = "80";
+  }
+
+  if (!p) {
+    printf("NO\n");
+  }
+
+  *path = p;
+  while (*p && *p != '#') {
+    p++;
+  }
+  *p++ = 0;
+
+  printf("Protocol: %s\n", protocol);
+  printf("Hostname: %s\n", *hostname);
+  printf("Port: %s\n", *port);
+  printf("Path: %s\n", *path);
+  printf("#: %s\n", p);
+  printf("============================================\n");
+}
+
+int connect_to_host(char *hostname, char *port) {
+  printf("Configuring remote address...\n");
+  struct addrinfo hints;
+  memset(&hints, 0, sizeof(hints));
+  hints.ai_socktype = SOCK_STREAM;
+
+  struct addrinfo *peer_address;
+  if (getaddrinfo(hostname, port, &hints, &peer_address)) {
+    fprintf(stderr, "getaddrinfo() failed. (%d)\n", errno);
+    exit(1);
+  }
+
+  printf("Remote address is: ");
+  char address_buffer[128];
+  char service_buffer[128];
+  getnameinfo(peer_address->ai_addr, peer_address->ai_addrlen, address_buffer,
+              sizeof(address_buffer), service_buffer, sizeof(service_buffer),
+              NI_NUMERICHOST);
+  printf("%s %s\n", address_buffer, service_buffer);
+
+  int server_socket = socket(peer_address->ai_family, peer_address->ai_socktype,
+                             peer_address->ai_protocol);
+  if (server_socket == -1) {
+    fprintf(stderr, "socket() failed. (%d)", errno);
+    exit(1);
+  }
+
+  printf("Connecting...\n");
+  if (connect(server_socket, peer_address->ai_addr, peer_address->ai_addrlen)) {
+    fprintf(stderr, "connect() failed. (%d)", errno);
+    exit(1);
+  }
+  freeaddrinfo(peer_address);
+
+  printf("Connected.\n\n");
+
+  return server_socket;
+}
+
+void send_request(int s, char *hostname, char *port, char *path) {
+  char buffer[2048];
+  sprintf(buffer, "GET /%s HTTP/1.1\r\n", path);
+  sprintf(buffer + strlen(buffer), "Host: %s:%s\r\n", hostname, port);
+  sprintf(buffer + strlen(buffer), "Connection: close\r\n");
+  sprintf(buffer + strlen(buffer), "User-Agent: hamza web_get 1.0\r\n");
+  sprintf(buffer + strlen(buffer), "\r\n");
+
+  send(s, buffer, strlen(buffer), 0);
+  printf("Send Headers:\n%s", buffer);
+}
+
+int main(int argc, char *argv[]) {
+  if (argc < 2) {
+    fprintf(stderr, "usage: web_get url\n");
+    return 1;
+  }
+
+  char *url = argv[1];
+  char *hostname, *port, *path;
+  parse_url(url, &hostname, &port, &path);
+
+  int server_socket = connect_to_host(hostname, port);
+  send_request(server_socket, hostname, port, path);
+
+  const clock_t start_time = clock();
+  char response[RESPONSE_SIZE + 1];
+  char *p = response, *q;
+  char *end = response + RESPONSE_SIZE;
+  char *body = 0;
+
+  enum { E_LENGTH, E_CHUNKED, E_CONNECTION };
+  int encoding = 0;
+  int remaining = 0;
+
+  while (1) {
+    if ((clock() - start_time) / CLOCKS_PER_SEC > TIMEOUT) {
+      fprintf(stderr, "timeout after %.2f seconds\n", TIMEOUT);
+      return 1;
+    }
+
+    if (p == end) {
+      fprintf(stderr, "out of buffer space\n");
+      return 1;
+    }
+
+    fd_set reads;
+    FD_ZERO(&reads);
+    FD_SET(server_socket, &reads);
+
+    struct timeval timeout;
+    timeout.tv_sec = 0;
+    timeout.tv_usec = 200000;
+    if (select(server_socket + 1, &reads, NULL, NULL, &timeout) < 0) {
+      fprintf(stderr, "select() failed. (%d)", errno);
+      return 1;
+    }
+
+    if (FD_ISSET(server_socket, &reads)) {
+      int bytes_recieved = recv(server_socket, p, end - p, 0);
+      if (bytes_recieved < 1) {
+        if (encoding == E_CONNECTION && body) {
+          printf("%.*s", (int)(end - body), body);
+        }
+        printf("\nConnection closed by peer.\n");
+        break;
+      }
+
+      p += bytes_recieved;
+      *p = 0;
+
+      if (!body && (body = strstr(response, "\r\n\r\n"))) {
+        *body = 0;
+        body += 4;
+        printf("Received Headers:\n%s\n\n", response);
+
+        q = strstr(response, "\nContent-Length:");
+        if (q) {
+          encoding = E_LENGTH;
+          q = strchr(q, ' ');
+          q += 1;
+
+          remaining = strtol(q, 0, 10);
+        } else {
+          q = strstr(response, "\nTransfer-Encoding: chunked");
+          if (q) {
+            encoding = E_CHUNKED;
+            remaining = 0;
+          } else {
+            encoding = E_CONNECTION;
+          }
+        }
+        printf("Received Body:\n");
+      }
+
+      if (!body)
+        continue;
+
+      if (encoding == E_LENGTH) {
+        if (p - body >= remaining) {
+          printf("%.*s", remaining, body);
+          break;
+        }
+      } else if (encoding == E_CHUNKED) {
+        do {
+          if (remaining == 0) {
+            if ((q = strstr(body, "\r\n"))) {
+              remaining = strtol(body, 0, 16);
+              if (!remaining)
+                goto finish;
+              body = q + 2;
+            } else {
+              break;
+            }
+          }
+          if (remaining && p - body >= remaining) {
+            printf("%.*s", remaining, body);
+            body += remaining + 2;
+            remaining = 0;
+          }
+        } while (!remaining);
+      }
+    }
+  }
+
+finish:
+  printf("\nClosing socket...\n");
+  close(server_socket);
+  printf("Finished\n");
+
+  return 0;
+}
